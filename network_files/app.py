@@ -1,17 +1,19 @@
 # ------------------------------------------------------------------------------------------------
 # Script name: backup.py
 # Created on: 2016.11.05
-# Updated:    2016.11.07
+# Updated:    2016.11.16
 # Author: Hayden Elza
 # Purpose: 	Used to backup multiple files or directories into bz2 archives.
 #			A breif log file is kept to track potential errors.
 #			Emails are sent to notify sys admin of errors immediately.
-# Version: 2.1
+# Version: 2.3
 # History: - Rewrote the script to be more effiecent and archive over network instead of copying
 #            locally first.
 #          - Using tarfile to archive instead of shutil.make_archive, this allows the compression
 #            of a list of files rather than a directory
 #          - Using config file to easily modify different applications.
+#          - Ignore .lock files using exclude function in tar.add()
+#          - Gracefully skip files that cannot be added to archive
 # -------------------------------------------------------------------------------------------------
 
 import os
@@ -29,28 +31,54 @@ temp_directory   = main_config.temp_directory  # Can be None to archive directly
 output_directory = main_config.output_directory
 
 
-def archive(files,base_name,workspace,nosp_name,datestamp):
+def archive(files,base_name,workspace,nosp_name,datestamp,warnings):
 	import tarfile
 
-	print "Archiving..."
+	print datetime_stamp("timestamp"),"Archiving..."
 
 	# Build archive name
 	archive_name = nosp_name + "_" + datestamp
-	
-	if workspace is None:
-		shutil.make_archive(base_name+archive_name, "bztar", root_dir)
-		print "Finished archiving."
-	else:
-		tar = tarfile.open(workspace+archive_name+".tar.bz2", "w:bz2")
 
-		for file in files: tar.add(file)
-		tar.close()
+	# If archiving directly to ouput dir set workspace to output
+	if workspace is None: workspace = base_name
 
-		print datetime_stamp("timestamp"),"Finished archiving."
+	# Open archive
+	tar = tarfile.open(workspace+archive_name+".tar.bz2", "w:bz2")
+
+	# Iterate through files in to_backup list
+	for file in files:
+		
+		# If file, try adding
+		if os.path.isfile(file):
+			try: tar.add(file, exclude=exclude_func)
+			except: warnings.append("Warning: {} was skipped because if could not be added to archive.".format(file))
+		
+		# If directory, walk through so we can trying adding each file one at a time; this way if one fails, only that file will be missing from the archive.
+		else:
+			for root, dirs, files in os.walk(file):
+				for f in files:
+					try: tar.add(os.path.join(root, f), exclude=exclude_func)
+					except: warnings.append("Warning: {} was skipped because if could not be added to archive.".format(os.path.join(root, f)))
+				for d in dirs:
+					try: tar.add(os.path.join(root, d), exclude=exclude_func, recursive=False)
+					except: warnings.append("Warning: {} was skipped because if could not be added to archive.".format(os.path.join(root, d)))
+
+	# Close archive when finished
+	tar.close()
+	print datetime_stamp("timestamp"),"Finished archiving."
+
+	# If using a workspace, copy archive from workspace to output directory
+	if workspace != base_name:
 		shutil.move(workspace+archive_name+".tar.bz2", base_name+archive_name+".tar.bz2")
 		print datetime_stamp("timestamp"),"Finished copying"
 		os.rmdir(workspace)
 		print datetime_stamp("timestamp"),"Removed workspace"
+
+	return warnings
+
+def exclude_func(filename):
+	if ".lock" in filename: return True
+	else: return False
 
 def send_email(msg,full_name):
 	import smtplib
@@ -84,6 +112,7 @@ def datetime_stamp(stamp_type):
 	elif stamp_type == "timestamp": return "{}-{:02}-{:02} {:02}.{:02}".format(t.year,t.month,t.day,t.hour,t.minute)
 	else: return
 
+
 warnings = []
 datestamp = datetime_stamp("datestamp")
 
@@ -103,7 +132,7 @@ if temp_directory is not None:
 	if not os.path.exists(temp_directory): os.makedirs(temp_directory)
 
 try:
-	archive(to_backup,output_directory,temp_directory,nosp_name,datestamp)
+	warnings = archive(to_backup,output_directory,temp_directory,nosp_name,datestamp,warnings)
 	message = "{} completed successfully :D\n{}".format(full_name,datetime_stamp("timestamp"))
 
 except Exception as e: 
